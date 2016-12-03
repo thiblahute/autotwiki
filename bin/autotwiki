@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 # -*- coding: utf-8 -*-
 #
 # Copyright © 2014 Samsung Electronics, Ltd.
@@ -16,13 +16,16 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from datetime import datetime
 import os
 import re
 import sys
 import json
 import string
+import git
 from argparse import ArgumentParser
 from subprocess import (Popen, PIPE)
+import subprocess
 
 sys.path.insert(0, os.path.realpath(
         os.path.join(os.path.dirname(__file__), "..")))
@@ -52,7 +55,7 @@ class Autotwiki(object):
                             help="Generate report for the given week number rather than current",
                             default=None)
         parser.add_argument('-y', '--year', action='store', type=int, dest='year_number',
-                            help="Generate report for the given year rather than current",
+                            help="Generate report for the given year",
                             default=None)
         self.options = parser.parse_args()
 
@@ -85,29 +88,28 @@ def update_repository(repo):
 def measure(hook, target, regex, begin_date=None, end_date=None):
     """Executes hook and returns total number of commits"""
     total = 0
-    if begin_date is None:
-        begin = 'Beginning'
-    else:
-        begin = begin_date.strftime('%m-%d-%Y')
-    if end_date is None:
-        end = 'End'
-    else:
-        end = end_date.strftime('%m-%d-%Y')
-    cmd = ["hooks/%s" %(hook), target, begin, end]
-    print cmd
-    p = Popen(cmd, shell=False, stdout=PIPE, stderr=PIPE)
-    errors = p.stderr.readlines()
-    if len(errors)>0:
-        sys.stderr.write("Error running command:  %s\n" %(' '.join(cmd)))
-        sys.stderr.write('\n'.join(errors))
-        sys.exit(3)
-    for line in p.stdout.readlines():
-        if not regex.search(line):
-            continue
-        value = line.split()[0]
-        assert value.isdigit()
-        total += int(value)
-    return total
+    begin = begin_date.strftime('%m-%d-%Y')
+    end = end_date.strftime('%m-%d-%Y')
+
+    repo = git.Repo(target)
+    commit = repo.head.commit
+    while datetime.date(datetime.fromtimestamp(commit.committed_date)) >= end_date:
+        commit = commit.parents[0]
+        if not commit.parents:
+            break
+
+    commited = []
+    reviewed = []
+    while datetime.date(datetime.fromtimestamp(commit.committed_date)) >= begin_date:
+        if regex.search(commit.author.name):
+            commited.append(commit)
+        elif regex.search(commit.committer.name):
+            reviewed.append(commit)
+        if not commit.parents:
+            break
+        commit = commit.parents[0]
+
+    return commited, reviewed
 
 
 if __name__ == "__main__":
@@ -142,7 +144,6 @@ if __name__ == "__main__":
     author = re.compile(app.config['name'])
     #print("%-30s %10s %10s %10s" %("Repository", "This Week", "This Year", "All Time"))
     for project in app.config['projects']:
-        print "Project: ", project
         row_params = {
             'project_name': project['name'],
 
@@ -170,79 +171,40 @@ if __name__ == "__main__":
             'new_features_all_time': 0,
             'patches_for_gbm_request_all_time': 0,
             }
+
+        commited = []
+        reviewed = []
         for repo in project['repositories']:
-            print "  Repo: ", repo
             if not update_repository(repo['location']):
                 sys.stderr.write("Error updating repository %s\n" %(repo['location']))
                 sys.exit(1)
 
             # Patches
-            c = measure("commits_per_author",
-                        repo['location'],
-                        author,
-                        week.begin, week.end)
-            row_params['patches_committed_this_week'] += c
+            c, r = measure("commits_per_author", repo['location'], author, week.begin, week.end)
+            row_params['patches_committed_this_week'] += len(c)
+            row_params['patches_reviewed_this_week'] += len(r)
 
-            c = measure("commits_per_author",
-                        repo['location'],
-                        author,
-                        week_0.begin, week.end)
-            row_params['patches_committed_this_year'] += c
+            if c:
+                print("\nCommited commits in %s:" % os.path.basename(repo['location']))
+                for commit in c:
+                    print(" * %s" % commit.message.split("\n")[0])
 
-            c = measure("commits_per_author",
-                        repo['location'],
-                        author,
-                        None, week.end)
-            row_params['patches_committed_all_time'] += c
+            if r:
+                print("Reviewed commits in %s:" % os.path.basename(repo['location']))
+                for commit in r:
+                    print(" * %s" % commit.message.split("\n")[0])
 
-            # Reviews
-            c = measure("reviews_per_committer",
-                        repo['location'],
-                        author,
-                        week.begin, week.end)
-            row_params['patches_reviewed_this_week'] += c
+            if app.options.year_number:
+                print("Generating for year: %s" % year)
+                c, r = measure("commits_per_author", repo['location'], author, week_0.begin, week.end)
+                row_params['patches_committed_this_year'] += len(c)
+                row_params['patches_reviewed_this_year'] += len(r)
 
-            c = measure("reviews_per_committer",
-                        repo['location'],
-                        author,
-                        week_0.begin, week.end)
-            row_params['patches_reviewed_this_year'] += c
+            # c, r = measure("reviews_per_committer", repo['location'], author, None, week.end)
+            # row_params['patches_committed_all_time'] += len(c)
+            # row_params['patches_reviewed_all_time'] += len(r)
 
-            c = measure("reviews_per_committer",
-                        repo['location'],
-                        author,
-                        None, week.end)
-            row_params['patches_reviewed_all_time'] += c
 
-            submissions = project.get('submissions', None)
-            if submissions is None:
-                continue
-
-        c = measure(submissions['hook'],
-                    submissions['author'],
-                    re.compile(submissions['owner']),
-                    week.begin, week.end)
-        print "Measured submissions this week as ", c
-        row_params['patches_submitted_this_week'] += c
-
-        c = 0 # TODO
-#        c = measure(submissions['hook'],
-#                    submissions['author'],
-#                    re.compile(submissions['owner']),
-#                    week_0.begin, week.end)
-        row_params['patches_submitted_this_year'] += c
-
-        c = 0 # TODO
-#        c = measure(submissions['hook'],
-#                    submissions['author'],
-#                    re.compile(submissions['owner']),
-#                    None, week.end)
-        row_params['patches_submitted_all_time'] += c
-
-        print("%-30s %10d %10d %10d" %(project['name'],
-                                       row_params['patches_reviewed_this_week'],
-                                       row_params['patches_reviewed_this_year'],
-                                       row_params['patches_reviewed_all_time']))
 
         # TODO: Pass the collected data to one or more formatters
         # TODO: Add the output of the formatters to params
@@ -263,6 +225,7 @@ if __name__ == "__main__":
         url = twiki.url_weekly_status(week)
         if not app.options.new:
             text = twiki.get_page(url)
+        print "%s" % url
 
     # If current status page is empty, load from the template
     if len(text) < 100:
