@@ -27,6 +27,10 @@ from argparse import ArgumentParser
 from subprocess import (Popen, PIPE)
 import subprocess
 
+from xml.etree import ElementTree
+import urllib
+from urlparse import urlparse, parse_qs, urlunparse
+
 sys.path.insert(0, os.path.realpath(
         os.path.join(os.path.dirname(__file__), "..")))
 from autotwiki.week import Week
@@ -172,8 +176,6 @@ if __name__ == "__main__":
             'patches_for_gbm_request_all_time': 0,
             }
 
-        commited = []
-        reviewed = []
         for repo in project['repositories']:
             if not update_repository(repo['location']):
                 sys.stderr.write("Error updating repository %s\n" %(repo['location']))
@@ -186,8 +188,52 @@ if __name__ == "__main__":
 
             if c:
                 print("\nCommited commits in %s:" % os.path.basename(repo['location']))
+                bugz = {}
                 for commit in c:
-                    print(" * %s" % commit.message.split("\n")[0])
+                    message = commit.message.split("\n")
+                    print(" * %s" % message[0])
+
+                    for l in message:
+                        if not 'bugzilla' in l:
+                            continue
+                        url = urlparse(l)
+                        if "bugzilla" not in url.netloc:
+                            continue
+
+                        query = parse_qs(url.query)
+                        _id = query.get('id')
+                        if not _id:
+                            continue
+                        if isinstance(_id, list):
+                            _id = _id[0]
+                        url_parts = tuple(list(url)[:3] + ['', '', ''])
+                        ids = bugz.get(url_parts, [])
+                        ids.append(_id)
+                        bugz[url_parts] = ids
+
+                for url_parts, ids in bugz.items():
+                    query = {'id': ','.join(ids)}
+                    query['ctype'] = 'xml'
+                    url_parts = list(url_parts)
+                    url_parts[4] = urllib.urlencode(query)
+                    try:
+                        res = urllib.urlopen(urlunparse(url_parts))
+                    except Exception as e:
+                        print("  + Could not properly check bugs status for: %s (%s)\n"
+                            % (urlunparse(url_parts), e), Colors.FAIL)
+                        continue
+
+                    root = ElementTree.fromstring(res.read())
+                    bugs = root.findall('./bug')
+                    for bugelem in bugs:
+                        severity = bugelem.findtext('./bug_severity')
+                        print("     -> bug: %s, status: %s" % (_id, severity))
+
+                        if 'enhancement' in severity:
+                            row_params['enhancements_this_week'] += 1
+                        else:
+                            row_params['bugs_fixed_this_week'] += 1
+
 
             if r:
                 print("Reviewed commits in %s:" % os.path.basename(repo['location']))
