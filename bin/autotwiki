@@ -27,6 +27,7 @@ from argparse import ArgumentParser
 from subprocess import (Popen, PIPE)
 import subprocess
 
+import CommonMark
 from xml.etree import ElementTree
 import urllib
 from urlparse import urlparse, parse_qs, urlunparse
@@ -176,6 +177,7 @@ if __name__ == "__main__":
             'patches_for_gbm_request_all_time': 0,
             }
 
+        summary = ""
         for repo in project['repositories']:
             if not update_repository(repo['location']):
                 sys.stderr.write("Error updating repository %s\n" %(repo['location']))
@@ -187,12 +189,17 @@ if __name__ == "__main__":
             row_params['patches_reviewed_this_week'] += len(r)
 
             if c:
-                print("\nCommited commits in %s:" % os.path.basename(repo['location']))
+                m = "\n * Commited commits in %s:" % os.path.basename(repo['location'])
+                print(m)
+                summary += m + "\n"
+
                 bugz = {}
                 for commit in c:
                     message = commit.message.split("\n")
-                    print(" * %s" % message[0])
 
+                    m = "    - %s: %s" % (commit.hexsha, message[0])
+
+                    _id = None
                     for l in message:
                         if not 'bugzilla' in l:
                             continue
@@ -210,6 +217,11 @@ if __name__ == "__main__":
                         ids = bugz.get(url_parts, [])
                         ids.append(_id)
                         bugz[url_parts] = ids
+
+                    if _id:
+                        m += " (bug #%s)" % _id
+                    summary += m + "\n"
+                    print(m)
 
                 for url_parts, ids in bugz.items():
                     query = {'id': ','.join(ids)}
@@ -236,9 +248,14 @@ if __name__ == "__main__":
 
 
             if r:
-                print("Reviewed commits in %s:" % os.path.basename(repo['location']))
+                m = " * Reviewed commits in %s:" % os.path.basename(repo['location'])
+                print(m)
+                summary += m + "\n"
+
                 for commit in r:
-                    print(" * %s" % commit.message.split("\n")[0])
+                    m = "    - %s" % commit.message.split("\n")[0]
+                    print(m)
+                    summary += m + "\n"
 
             if app.options.year_number:
                 print("Generating for year: %s" % year)
@@ -259,6 +276,7 @@ if __name__ == "__main__":
 
     # Close off the patch_table_rows section
     page_params['patch_table_rows'] += "\n" + stat_end_label
+    page_params['summary'] = CommonMark.commonmark(summary)
 
     # Prepare to interact with the remote twiki site
     print "Preparing to send to twiki"
